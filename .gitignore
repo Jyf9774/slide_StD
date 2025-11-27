@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Virtual Environment
+venv/
+env/
+env2/
+env3/
+venv2/
+venv3/
+
+# Output
+output/
+*.pptx
+
+# Logs
+logs/
+*.log
+
+# Keys
+key_manage.py
