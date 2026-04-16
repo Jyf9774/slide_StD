@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, useCallback } from "react"
 import { Link } from "react-router-dom"
 import { api } from "@/lib/utils"
 import { Card, CardContent } from "@/components/ui/card"
@@ -11,6 +11,7 @@ import {
   ArrowRight,
   Sparkles,
   ImageIcon,
+  RefreshCw,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -34,13 +35,22 @@ interface SlideInfo {
 export function DashboardPage() {
   const [slides, setSlides] = useState<SlideInfo[]>([])
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
 
-  useEffect(() => {
-    api<SlideInfo[]>("/api/slides")
+  const fetchSlides = useCallback(() => {
+    return api<SlideInfo[]>("/api/slides")
       .then(setSlides)
       .catch(console.error)
-      .finally(() => setLoading(false))
   }, [])
+
+  useEffect(() => {
+    fetchSlides().finally(() => setLoading(false))
+  }, [fetchSlides])
+
+  function handleRefresh() {
+    setRefreshing(true)
+    fetchSlides().finally(() => setRefreshing(false))
+  }
 
   if (loading) {
     return (
@@ -65,12 +75,24 @@ export function DashboardPage() {
             {slides.length} processed slides
           </p>
         </div>
-        <Link to="/process">
-          <Button>
-            <Sparkles className="h-4 w-4" />
-            Process New Slide
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={handleRefresh}
+            disabled={refreshing}
+          >
+            <RefreshCw
+              className={cn("h-4 w-4", refreshing && "animate-spin")}
+            />
           </Button>
-        </Link>
+          <Link to="/process">
+            <Button>
+              <Sparkles className="h-4 w-4" />
+              Process New Slide
+            </Button>
+          </Link>
+        </div>
       </div>
 
       {/* Grid */}

@@ -1,14 +1,30 @@
 import { Outlet, NavLink } from "react-router-dom"
 import { LayoutDashboard, Sparkles, Sun, Moon } from "lucide-react"
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { cn } from "@/lib/utils"
 
+function getSystemDark() {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+}
+
 export function Layout() {
-  const [dark, setDark] = useState(true)
+  const [dark, setDark] = useState(getSystemDark)
+
+  // Sync <html> class on mount & whenever dark changes
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", dark)
+  }, [dark])
+
+  // Listen for OS theme changes
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)")
+    const handler = (e: MediaQueryListEvent) => setDark(e.matches)
+    mq.addEventListener("change", handler)
+    return () => mq.removeEventListener("change", handler)
+  }, [])
 
   function toggleTheme() {
-    setDark(!dark)
-    document.documentElement.classList.toggle("dark", !dark)
+    setDark((d) => !d)
   }
 
   return (

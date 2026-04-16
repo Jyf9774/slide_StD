@@ -482,6 +482,36 @@ function NarrationTab({ narration }: { narration: NarrationData }) {
   )
 }
 
+function AnimationBlock({ anim, left, width }: { anim: AnimationItem; left: number; width: number }) {
+  const [hover, setHover] = useState(false)
+  return (
+    <div
+      className={cn(
+        "absolute top-1 h-6 rounded-sm flex items-center justify-center text-[8px] font-medium text-primary-foreground truncate px-1 cursor-default",
+        anim.animation_type === "Entrance"
+          ? "bg-success"
+          : anim.animation_type === "Emphasis"
+          ? "bg-info"
+          : "bg-destructive"
+      )}
+      style={{ left: `${left}%`, width: `${width}%`, minWidth: "4px" }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      {width > 3 ? anim.effect : ""}
+      {hover && (
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 z-50 pointer-events-none">
+          <div className="bg-popover text-popover-foreground border rounded-md shadow-md px-2.5 py-1.5 text-[10px] whitespace-nowrap space-y-0.5">
+            <div className="font-semibold">{anim.element}</div>
+            <div>{anim.effect} · {anim.animation_type}</div>
+            <div className="text-muted-foreground">Duration: {anim.duration}s · Delay: {anim.delay.toFixed(1)}s</div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AnimationTab({ animation }: { animation: AnimationData }) {
   // Group animations by element
   const grouped = animation.animations.reduce(
@@ -517,23 +547,7 @@ function AnimationTab({ animation }: { animation: AnimationData }) {
               {anims.map((anim, i) => {
                 const left = (anim.delay / maxTime) * 100
                 const width = Math.max((anim.duration / maxTime) * 100, 1)
-                return (
-                  <div
-                    key={i}
-                    className={cn(
-                      "absolute top-1 h-6 rounded-sm flex items-center justify-center text-[8px] font-medium text-primary-foreground truncate px-1",
-                      anim.animation_type === "Entrance"
-                        ? "bg-success"
-                        : anim.animation_type === "Emphasis"
-                        ? "bg-info"
-                        : "bg-destructive"
-                    )}
-                    style={{ left: `${left}%`, width: `${width}%`, minWidth: "4px" }}
-                    title={`${anim.effect} @ ${anim.delay.toFixed(1)}s (${anim.duration}s)`}
-                  >
-                    {width > 3 ? anim.effect : ""}
-                  </div>
-                )
+                return <AnimationBlock key={i} anim={anim} left={left} width={width} />
               })}
             </div>
             {/* Animation list */}

@@ -60,7 +60,7 @@ class Qwen3TTSGenerator:
     def __init__(self, voice: str = "Cherry", sample_rate: int = 24000):
         """
         初始化TTS生成器
-        :param voice: 发音人，可选值：Cherry(甜美女声)、Alvin(成熟男声)、Wanwan(可爱童声)等
+        :param voice: 发音人，可选值：Cherry/芊悦(阳光亲切女声)、Serena/苏瑶(温柔女声)、Ethan/晨煦(阳光活力男声)
         :param sample_rate: 采样率，默认24000Hz
         """
         dashscope.api_key = Ali_Cloud_LLM_Key

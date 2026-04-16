@@ -8,6 +8,8 @@ import json
 import uuid
 import asyncio
 import shutil
+import re
+import queue as queue_mod
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
@@ -41,6 +43,128 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 # Task state management
 tasks: dict = {}
 active_websockets: dict[str, list[WebSocket]] = {}
+
+
+# Spinner frame characters used by media.progress.Spinner
+_SPINNER_CHARS = frozenset('⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏')
+
+
+def _is_spinner_line(msg: str) -> bool:
+    """Check if a log message is a spinner progress line."""
+    return bool(msg) and msg[0] in _SPINNER_CHARS
+
+
+def _spinner_msg_key(msg: str) -> str:
+    """Extract the stable message prefix from a spinner line for dedup.
+    e.g. '⠇ VLM分析幻灯片整体信息... 6s' -> 'VLM分析幻灯片整体信息'
+    """
+    idx = msg.find('...')
+    return msg[1:idx].strip() if idx > 0 else ""
+
+
+async def _log(task_id: str, message: str):
+    """Append a log line to a task and broadcast it.
+
+    Consecutive spinner updates with the same message prefix are merged
+    in-place so the frontend log panel doesn't flood with repetitive lines.
+    """
+    if task_id in tasks:
+        tasks[task_id].setdefault("logs", [])
+        entry = {"time": datetime.now().strftime("%H:%M:%S"), "msg": message}
+        logs = tasks[task_id]["logs"]
+
+        # Merge consecutive spinner lines (e.g. "⠇ VLM分析... 6s" -> "⠹ VLM分析... 7s")
+        if (_is_spinner_line(message)
+                and logs
+                and _is_spinner_line(logs[-1]["msg"])
+                and _spinner_msg_key(message) == _spinner_msg_key(logs[-1]["msg"])):
+            logs[-1] = entry  # replace in-place, keep count stable
+        else:
+            logs.append(entry)
+
+        await broadcast_progress(task_id, tasks[task_id])
+
+
+class OutputCapture:
+    """Intercepts sys.stdout writes and queues complete lines for async log consumption."""
+
+    def __init__(self, original):
+        self._original = original
+        self._queue: queue_mod.Queue = queue_mod.Queue()
+        self._buffer = ""
+
+    def write(self, text: str) -> int:
+        if self._original:
+            self._original.write(text)
+        self._buffer += text
+        # Split on \n or \r (progress-bar style output)
+        parts = re.split(r'[\r\n]+', self._buffer)
+        self._buffer = parts[-1]  # incomplete trailing part
+        for part in parts[:-1]:
+            stripped = part.strip()
+            if stripped:
+                self._queue.put(stripped)
+        return len(text)
+
+    def flush(self):
+        if self._original:
+            self._original.flush()
+        if self._buffer.strip():
+            self._queue.put(self._buffer.strip())
+            self._buffer = ""
+
+    def get_lines(self) -> list[str]:
+        lines = []
+        while True:
+            try:
+                lines.append(self._queue.get_nowait())
+            except queue_mod.Empty:
+                break
+        return lines
+
+    @property
+    def encoding(self):
+        return getattr(self._original, "encoding", "utf-8")
+
+    def isatty(self):
+        return False
+
+
+async def _run_with_logs(task_id: str, func):
+    """Run a blocking function in executor while capturing its stdout as real-time task logs."""
+    capture = OutputCapture(sys.__stdout__)
+    finished = asyncio.Event()
+
+    def wrapped():
+        old_stdout = sys.stdout
+        sys.stdout = capture
+        try:
+            return func()
+        finally:
+            sys.stdout = old_stdout
+            capture.flush()
+
+    async def drain():
+        while not finished.is_set():
+            for line in capture.get_lines():
+                await _log(task_id, line)
+            try:
+                await asyncio.wait_for(finished.wait(), timeout=0.4)
+            except asyncio.TimeoutError:
+                pass
+        # Final drain
+        for line in capture.get_lines():
+            await _log(task_id, line)
+
+    drain_task = asyncio.create_task(drain())
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(None, wrapped)
+    finally:
+        finished.set()
+        await drain_task
+
+    return result
 
 
 class ProcessConfig(BaseModel):
@@ -256,6 +380,21 @@ async def list_uploads():
     return files
 
 
+@app.get("/api/preview/{filename}")
+async def preview_image(filename: str):
+    """Serve an uploaded or project-root image for preview."""
+    file_path = UPLOAD_DIR / filename
+    if not file_path.exists():
+        file_path = PROJECT_ROOT / filename
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(404, "File not found")
+    # Security: only serve from allowed dirs
+    resolved = file_path.resolve()
+    if not (str(resolved).startswith(str(UPLOAD_DIR.resolve())) or str(resolved).startswith(str(PROJECT_ROOT.resolve()))):
+        raise HTTPException(403, "Access denied")
+    return FileResponse(file_path)
+
+
 @app.post("/api/process")
 async def start_process(config: ProcessConfig, filename: str):
     """Start slide processing pipeline."""
@@ -287,19 +426,21 @@ async def _run_process(task_id: str, image_path: str, config: ProcessConfig):
     try:
         tasks[task_id]["status"] = "running"
         tasks[task_id]["step"] = "slide_processing"
-        tasks[task_id]["progress"] = 10
-        await broadcast_progress(task_id, tasks[task_id])
+        tasks[task_id]["progress"] = 5
+        await _log(task_id, f"Starting pipeline for {Path(image_path).name}")
 
-        # Import and run pipeline
         from pipeline import process_slide
         loop = asyncio.get_event_loop()
 
-        tasks[task_id]["progress"] = 20
-        tasks[task_id]["step"] = "layout_detection"
-        await broadcast_progress(task_id, tasks[task_id])
+        mode = "hybrid (DocLayout-YOLO + VLM)" if config.hybrid_mode else ("VLM" if config.use_vlm else "CV fallback")
+        await _log(task_id, f"Analysis mode: {mode}")
 
-        json_path, pptx_path = await loop.run_in_executor(
-            None,
+        tasks[task_id]["progress"] = 10
+        tasks[task_id]["step"] = "layout_detection"
+        await _log(task_id, "Running layout detection...")
+
+        json_path, pptx_path = await _run_with_logs(
+            task_id,
             lambda: process_slide(
                 image_path,
                 str(OUTPUT_DIR),
@@ -312,11 +453,18 @@ async def _run_process(task_id: str, image_path: str, config: ProcessConfig):
             )
         )
 
-        tasks[task_id]["progress"] = 70
+        tasks[task_id]["progress"] = 90
         tasks[task_id]["step"] = "reconstruction_complete"
-        await broadcast_progress(task_id, tasks[task_id])
+        await _log(task_id, f"Reconstruction done -> {Path(pptx_path).name}")
 
-        # Determine slide name
+        # Read element count from result
+        try:
+            meta = json.loads(Path(json_path).read_text(encoding="utf-8"))
+            elem_count = meta.get("element_count", "?")
+            await _log(task_id, f"Detected {elem_count} elements, metadata saved")
+        except Exception:
+            pass
+
         slide_name = Path(image_path).stem
         tasks[task_id]["progress"] = 100
         tasks[task_id]["status"] = "completed"
@@ -326,12 +474,12 @@ async def _run_process(task_id: str, image_path: str, config: ProcessConfig):
             "json_path": json_path,
             "pptx_path": pptx_path,
         }
-        await broadcast_progress(task_id, tasks[task_id])
+        await _log(task_id, "Slide processing complete")
 
     except Exception as e:
         tasks[task_id]["status"] = "failed"
         tasks[task_id]["error"] = str(e)
-        await broadcast_progress(task_id, tasks[task_id])
+        await _log(task_id, f"ERROR: {e}")
 
 
 @app.post("/api/narrate/{slide_name}")
@@ -369,13 +517,17 @@ async def start_narration(slide_name: str, config: NarrateConfig):
 async def _run_narration(task_id: str, json_path: str, config: NarrateConfig):
     try:
         from narration_generator import generate_narration
-        loop = asyncio.get_event_loop()
 
+        await _log(task_id, f"Generating narration (lang={config.language}, style={config.style})")
+        tasks[task_id]["progress"] = 30
+        await broadcast_progress(task_id, tasks[task_id])
+
+        await _log(task_id, "Calling LLM for narration text...")
         tasks[task_id]["progress"] = 50
         await broadcast_progress(task_id, tasks[task_id])
 
-        narration = await loop.run_in_executor(
-            None,
+        narration = await _run_with_logs(
+            task_id,
             lambda: generate_narration(json_path, language=config.language, style=config.style)
         )
 
@@ -383,11 +535,11 @@ async def _run_narration(task_id: str, json_path: str, config: NarrateConfig):
         tasks[task_id]["status"] = "completed"
         tasks[task_id]["step"] = "done"
         tasks[task_id]["result"] = {"narration": "generated"}
-        await broadcast_progress(task_id, tasks[task_id])
+        await _log(task_id, "Narration generated successfully")
     except Exception as e:
         tasks[task_id]["status"] = "failed"
         tasks[task_id]["error"] = str(e)
-        await broadcast_progress(task_id, tasks[task_id])
+        await _log(task_id, f"ERROR: {e}")
 
 
 @app.post("/api/tts/{slide_name}")
@@ -424,13 +576,17 @@ async def start_tts(slide_name: str, config: TTSConfig):
 async def _run_tts(task_id: str, narration_json: str, output_dir: str, config: TTSConfig):
     try:
         from media import generate_tts_and_animations
-        loop = asyncio.get_event_loop()
 
+        await _log(task_id, f"Starting TTS synthesis (voice={config.voice})")
+        tasks[task_id]["progress"] = 20
+        await broadcast_progress(task_id, tasks[task_id])
+
+        await _log(task_id, "Synthesizing speech audio segments...")
         tasks[task_id]["progress"] = 40
         await broadcast_progress(task_id, tasks[task_id])
 
-        result = await loop.run_in_executor(
-            None,
+        result = await _run_with_logs(
+            task_id,
             lambda: generate_tts_and_animations(
                 narration_json_path=narration_json,
                 output_dir=output_dir,
@@ -443,11 +599,12 @@ async def _run_tts(task_id: str, narration_json: str, output_dir: str, config: T
         tasks[task_id]["status"] = "completed"
         tasks[task_id]["step"] = "done"
         tasks[task_id]["result"] = {"tts": "generated"}
-        await broadcast_progress(task_id, tasks[task_id])
+        anim_note = "LLM animation scheme" if config.use_llm_animation else "rule-based animation"
+        await _log(task_id, f"TTS & {anim_note} generated successfully")
     except Exception as e:
         tasks[task_id]["status"] = "failed"
         tasks[task_id]["error"] = str(e)
-        await broadcast_progress(task_id, tasks[task_id])
+        await _log(task_id, f"ERROR: {e}")
 
 
 @app.get("/api/tasks/{task_id}")
@@ -501,9 +658,9 @@ async def get_default_config():
             "voice": "Cherry",
             "use_llm_animation": True,
             "voices": [
-                {"id": "Cherry", "label": "Cherry (甜美女声)"},
-                {"id": "Alvin", "label": "Alvin (成熟男声)"},
-                {"id": "Wanwan", "label": "Wanwan (可爱童声)"},
+                {"id": "Cherry", "label": "Cherry / 芊悦 (阳光亲切女声)"},
+                {"id": "Serena", "label": "Serena / 苏瑶 (温柔女声)"},
+                {"id": "Ethan", "label": "Ethan / 晨煦 (阳光活力男声)"},
             ],
         },
     }
