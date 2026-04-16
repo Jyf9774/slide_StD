@@ -1,0 +1,118 @@
+# Prompts Used in the Slide Segmentation and Reconstruction Pipeline
+
+## Prompt 1: LLM-based Slide Analysis and Segmentation
+
+```
+Please analyze this slide screenshot and return a comprehensive analysis including both page metadata and element list in JSON format:
+
+{
+  "metadata": {
+    "background_color": "#RRGGBB format background color, prioritize identifying the main background area color",
+    "title": "Main title text of the slide",
+    "subtitle": "Subtitle (if any)",
+    "slide_type": "Cover page/Content page/Chart page/End page, etc.",
+    "main_language": "Chinese/English/Bilingual",
+    "description": "1-2 sentences describing the main content of this slide",
+    "key_points": ["Point 1", "Point 2", "..."]
+  },
+  "elements": [
+    {
+      "id": "element_1",
+      "type": "text/image/chart/table/logo/diagram/decoration",
+      "text_content": "Extract all visible text, maintain original line breaks",
+      "description": "Brief description of this element's content",
+      "is_title": true/false,
+      "position": {
+        "x": number,
+        "y": number,
+        "width": number,
+        "height": number
+      },
+      "estimated_font_size": number (estimated main font size in pt),
+      "text_color": "#RRGGBB format main text color",
+      "has_border": true/false
+    }
+  ]
+}
+
+Notes:
+1. For background color, identify the main background area of the slide (usually white or light color), ignoring edge decorations
+2. Identify all distinct elements on the slide, including text blocks, images, charts, tables, etc.
+3. For each element, provide as much detail as possible
+4. Return only JSON, no other text
+```
+
+## Prompt 2: LLM-based Structured Narration Generation (Prompt 8)
+
+```
+Based on the slide metadata and elements provided , generate a structured narration text that aligns with the page semantics. Follow the principle of "content layering and rhythm adaptation" to ensure the narration logic matches the visual hierarchy.
+
+Input Data:
+{
+  "metadata": {
+    "title": "{slide_title}",
+    "subtitle": "{slide_subtitle}",
+    "slide_type": "{slide_type}",
+    "description": "{slide_description}",
+    "key_points": ["{key_point_1}", "{key_point_2}"],
+    "main_language": "{main_language}"
+  },
+  "elements": [
+    {
+      "id": "{element_id}",
+      "type": "{element_type}",
+      "text_content": "{element_text}",
+      "description": "{element_description}",
+      "is_title": {is_title}, 
+      "z_order": {z_order},
+      "position": {
+        "x": {x},
+        "y": {y},
+        "width": {width},
+        "height": {height}
+      },
+      "estimated_font_size": {font_size},
+      "text_color": "{text_color}"
+    }
+  ]
+}
+
+Requirements:
+1. First identify the slide's core argument (Key Message)
+2. Organize narration order by visual hierarchy: title → body → charts
+3. Assign narration time weights to each element based on importance
+4. Ensure semantic accuracy: accurately summarize chart data trends and text core points, avoid factual hallucinations
+5. Ensure rhythm adaptation: use alternating sentence lengths and punctuation to create pauses for animation transitions
+6. Ensure hierarchy correspondence: strictly follow the z_order index to maintain "mention appears" timing consistency
+7. Create element-text alignment mapping by identifying the specific sentence positions where each element is mentioned
+
+Return a JSON object with the following structure:
+{
+  "key_message": "The slide's core argument",
+  "narration": "Complete narration text with proper pauses and structure",
+  "element_timings": [
+    {
+      "element_id": "{element_id}",
+      "start_sentence": {sentence_index},
+      "end_sentence": {sentence_index},
+      "duration_weight": {weight_value}
+    }
+  ],
+  "narration_structure": {
+    "introduction": "Introduction section",
+    "body": "Main content section",
+    "conclusion": "Conclusion section"
+  }
+}
+
+Return only JSON, no other text.
+```
+
+## Usage Context
+
+These prompts are used in the following workflow:
+1. **Slide analysis and segmentation** (Prompt 1): GPT-4.1 analyzes the entire slide and returns comprehensive metadata and element list, including background color, title, slide type, and detailed element information with positions
+2. **Structured narration generation** (Prompt 2/Prompt 8): GPT-4.1 generates semantic-aligned narration text based on the metadata and elements, following content layering and rhythm adaptation principles
+3. The analysis results are used to segment the slide into elements, generate narration, and reconstruct it as a PPTX file
+
+The pipeline uses Azure OpenAI's GPT-4.1 model with vision capabilities to replace traditional OCR and rule-based classification methods. The structured narration generation follows three key constraints: semantic accuracy, rhythm adaptation, and hierarchy correspondence.

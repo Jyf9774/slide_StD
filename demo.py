@@ -1,152 +1,240 @@
 #!/usr/bin/env python3
 """
-幻灯片处理流水线演示
+幻灯片一键全流程演示脚本
+
+完整流程: 幻灯片截图 → 元素分割+PPTX重建 → 旁白生成 → TTS语音+动画方案
 
 使用方法:
-1. python demo.py <图片路径>
-2. python demo.py <图片路径> --lang=en  # 英文讲解
-3. python demo.py <图片路径> --no-gpt   # 不使用GPT
+  python demo.py                          # 默认处理 test_slide.png
+  python demo.py slide.png                # 处理指定图片
+  python demo.py slide.png --lang=en      # 英文讲解
+  python demo.py slide.png --voice=Alvin  # 指定发音人
+  python demo.py slide.png --no-tts       # 跳过TTS语音生成
+  python demo.py slide.png --no-vlm       # 不使用VLM（纯CV模式）
 """
 
 import os
 import sys
 import json
+import time
 
 
 def main():
-    """主函数"""
-    
-    # 解析参数
-    image_path = "test_slide.png"  # 默认使用test_slide.png
+    """一键全流程处理"""
+
+    # === 参数解析 ===
+    image_path = "test_slide.png"
     language = "zh"
-    use_gpt = True
-    
+    use_vlm = True
+    do_tts = True
+    voice = "Cherry"
+    output_dir = "./output"
+
     for arg in sys.argv[1:]:
-        if arg.startswith("--lang="):
-            language = arg.split("=")[1]
-        elif arg == "--no-gpt":
-            use_gpt = False
+        if arg in ("-h", "--help"):
+            print(__doc__)
+            sys.exit(0)
+        elif arg.startswith("--lang="):
+            language = arg.split("=", 1)[1]
+        elif arg.startswith("--voice="):
+            voice = arg.split("=", 1)[1]
+        elif arg.startswith("--output="):
+            output_dir = arg.split("=", 1)[1]
+        elif arg == "--no-vlm":
+            use_vlm = False
+        elif arg == "--no-tts":
+            do_tts = False
         elif not arg.startswith("-"):
             image_path = arg
-    
-    # 显示帮助信息（如果使用-h或--help）
-    if "-h" in sys.argv or "--help" in sys.argv:
-        print("""
-幻灯片处理流水线演示
-====================
-用法: python demo.py [图片路径] [选项]
 
-参数:
-  [图片路径]       幻灯片截图路径（默认: test_slide.png）
-
-选项:
-  --lang=zh/en    讲解语言（默认: zh）
-  --no-gpt        不使用GPT-4.1（使用传统CV/OCR）
-  -h, --help      显示此帮助信息
-
-示例:
-  python demo.py              # 使用默认的test_slide.png
-  python demo.py slide.png    # 使用指定的图片
-  python demo.py --lang=en    # 使用默认图片并生成英文讲解
-""")
-        sys.exit(0)
-    
     if not os.path.exists(image_path):
         print(f"错误: 找不到图片文件 '{image_path}'")
         sys.exit(1)
-    
-    print(f"\n📷 输入图片: {image_path}")
-    print(f"🌐 讲解语言: {'中文' if language == 'zh' else '英文'}")
-    print(f"🤖 使用GPT: {'是' if use_gpt else '否'}")
-    
-    # ========== 第一步: 分割与重建 ==========
-    print("\n" + "=" * 60)
-    print("第一步: 分割幻灯片并重建PPTX")
-    print("=" * 60)
-    
+
+    print(f"""
+{'='*60}
+  幻灯片一键全流程演示
+{'='*60}
+📷  输入图片: {image_path}
+🌐  讲解语言: {'中文' if language == 'zh' else 'English'}
+🎙️  发音人:   {voice}
+🤖  VLM模式:  {'启用' if use_vlm else '关闭'}
+🔊  TTS生成:  {'启用' if do_tts else '跳过'}
+📁  输出目录: {output_dir}
+{'='*60}
+""")
+
+    total_start = time.time()
+
+    # ================================================================
+    # 第一步: 幻灯片分割 + PPTX重建
+    # ================================================================
+    print("📌 第一步: 分割幻灯片 + 重建PPTX")
+    print("-" * 40)
+
     from pipeline import process_slide
-    
-    output_dir = "./output"
+
+    step_start = time.time()
     json_path, pptx_path = process_slide(
-        image_path, 
+        image_path,
         output_dir,
-        use_gpt=use_gpt
+        use_vlm=use_vlm,
+        hybrid_mode=use_vlm,  # VLM启用时自动使用混合模式
     )
-    
-    print(f"\n✅ 分割完成!")
-    print(f"   📄 JSON: {json_path}")
-    print(f"   📊 PPTX: {pptx_path}")
-    
-    # 读取JSON
+    step_time = time.time() - step_start
+
+    # 读取元数据
     with open(json_path, 'r', encoding='utf-8') as f:
         metadata = json.load(f)
-    
-    print(f"\n📋 元数据摘要:")
-    print(f"   - 幻灯片ID: {metadata['slide_id']}")
-    print(f"   - 尺寸: {metadata['width']}x{metadata['height']}")
-    print(f"   - 背景色: {metadata['background_color']}")
-    print(f"   - 元素数量: {metadata['element_count']}")
-    
-    print("\n📦 检测到的元素:")
+
+    print(f"\n✅ 分割完成 ({step_time:.1f}s)")
+    print(f"   幻灯片ID: {metadata['slide_id']}")
+    print(f"   尺寸: {metadata['width']}x{metadata['height']}")
+    print(f"   背景色: {metadata['background_color']}")
+    print(f"   元素数量: {metadata['element_count']}")
+    print(f"   JSON: {json_path}")
+    print(f"   PPTX: {pptx_path}")
+
+    print(f"\n   检测到的元素:")
     for elem in metadata['elements']:
-        text_preview = ""
-        if elem.get('text_content'):
-            text_preview = f" | {elem['text_content'][:40].replace(chr(10), ' ')}..."
-        print(f"   [{elem['name']}] {elem['type']}{text_preview}")
-    
-    # ========== 第二步: 生成讲解 ==========
-    print("\n" + "=" * 60)
-    print("第二步: 生成讲解脚本")
-    print("=" * 60)
-    
+        flag = "🏆" if elem.get('is_title') else "  "
+        text = elem.get('text_content', '')
+        preview = f" | {text[:40].replace(chr(10), ' ')}..." if text else ""
+        print(f"   {flag} [{elem['type']}] {elem['name']}{preview}")
+
+    # ================================================================
+    # 第二步: 生成讲解旁白
+    # ================================================================
+    print(f"\n📌 第二步: 生成讲解旁白")
+    print("-" * 40)
+
+    narration_data = None
+    narration_json_path = None
+
     try:
         from narration_generator import generate_narration
-        
+
+        step_start = time.time()
         narration = generate_narration(
             json_path,
             language=language,
             style="formal"
         )
-        
-        print(f"\n✅ 讲解生成完成!")
-        print(f"   - 讲解段落: {len(narration.segments)}个")
-        print(f"   - 预估时长: {narration.total_duration:.1f}秒")
-        
-        # 输出文件路径
+        step_time = time.time() - step_start
+
+        print(f"\n✅ 旁白生成完成 ({step_time:.1f}s)")
+        print(f"   讲解段落: {len(narration.segments)}个")
+        print(f"   预估时长: {narration.total_duration:.1f}秒")
+
+        # 找到输出的 narration json 文件
         slide_dir = os.path.dirname(json_path)
         slide_id = metadata['slide_id']
-        
-        print(f"\n📝 输出文件:")
-        print(f"   - {slide_id}_narration.json      (完整数据)")
-        print(f"   - {slide_id}_narration_script.txt (带元素标记)")
-        print(f"   - {slide_id}_narration.txt       (纯文本)")
-        
-        # 显示讲解预览
-        print("\n" + "-" * 60)
-        print("📖 讲解预览:")
-        print("-" * 60)
-        
+        narration_json_path = os.path.join(slide_dir, f"{slide_id}_narration.json")
+
+        if os.path.exists(narration_json_path):
+            with open(narration_json_path, 'r', encoding='utf-8') as f:
+                narration_data = json.load(f)
+
+        # 讲解预览
         plain_text = narration.to_plain_text()
-        if len(plain_text) > 600:
-            print(plain_text[:600])
-            print("\n... (更多内容请查看输出文件)")
-        else:
-            print(plain_text)
-        
-    except ImportError as e:
-        print(f"\n⚠️ 无法生成讲解: {e}")
-        print("   请确保已创建 key_manage.py 并配置 Azure_GPT_4_1_Key")
+        print(f"\n   📖 讲解预览:")
+        preview = plain_text[:300].replace('\n', '\n   ')
+        print(f"   {preview}")
+        if len(plain_text) > 300:
+            print(f"   ... (共{len(plain_text)}字)")
+
     except Exception as e:
-        print(f"\n⚠️ 讲解生成失败: {e}")
+        print(f"\n⚠️  旁白生成失败: {e}")
         import traceback
         traceback.print_exc()
-    
-    # ========== 完成 ==========
-    print("\n" + "=" * 60)
-    print("🎉 全部处理完成!")
-    print("=" * 60)
-    print(f"\n📁 输出目录: {os.path.dirname(json_path)}")
-    print(f"   可以用PowerPoint打开 {os.path.basename(pptx_path)} 查看效果")
+
+    # ================================================================
+    # 第三步: TTS语音合成 + 动画方案
+    # ================================================================
+    if do_tts and narration_json_path and os.path.exists(narration_json_path):
+        print(f"\n📌 第三步: TTS语音合成 + 动画方案生成")
+        print("-" * 40)
+
+        try:
+            from media import generate_tts_and_animations
+
+            slide_dir = os.path.dirname(json_path)
+
+            step_start = time.time()
+            tts_result = generate_tts_and_animations(
+                narration_json_path=narration_json_path,
+                output_dir=slide_dir,
+                voice=voice,
+                use_llm_animation=True
+            )
+            step_time = time.time() - step_start
+
+            print(f"\n✅ TTS + 动画生成完成 ({step_time:.1f}s)")
+            print(f"   发音人: {voice}")
+
+            if tts_result.get("type") == "batch":
+                total_dur = sum(r["audio_info"]["total_duration"] for r in tts_result["results"])
+                total_anim = sum(len(r["animation_scheme"]["animations"]) for r in tts_result["results"])
+                print(f"   总时长: {total_dur:.1f}秒")
+                print(f"   动画数: {total_anim}个")
+            else:
+                audio = tts_result.get("audio_info", {})
+                anim = tts_result.get("animation_scheme", {})
+                print(f"   音频时长: {audio.get('total_duration', 0):.1f}秒")
+                print(f"   动画数量: {len(anim.get('animations', []))}个")
+                print(f"   元素段时长: {anim.get('element_duration', 0):.1f}秒")
+
+            print(f"   音频目录: {os.path.join(slide_dir, 'tts')}")
+            print(f"   动画目录: {os.path.join(slide_dir, 'animation')}")
+
+        except Exception as e:
+            print(f"\n⚠️  TTS生成失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+    elif do_tts and not narration_json_path:
+        print(f"\n⏭️  跳过TTS: 旁白生成失败，无法合成语音")
+    elif not do_tts:
+        print(f"\n⏭️  跳过TTS (--no-tts)")
+
+    # ================================================================
+    # 完成汇总
+    # ================================================================
+    total_time = time.time() - total_start
+    slide_dir = os.path.dirname(json_path)
+
+    print(f"""
+{'='*60}
+  🎉 全流程处理完成！总耗时: {total_time:.1f}s
+{'='*60}
+📁 输出目录: {slide_dir}
+   📊 {os.path.basename(pptx_path)}  (重建的PPTX)
+   📄 {os.path.basename(json_path)}  (元数据)""")
+
+    # 列出 elements 目录
+    elements_dir = os.path.join(slide_dir, "elements")
+    if os.path.isdir(elements_dir):
+        elems = sorted(os.listdir(elements_dir))
+        print(f"   📂 elements/  ({len(elems)}个元素)")
+        for e in elems[:5]:
+            print(f"      {e}")
+        if len(elems) > 5:
+            print(f"      ... 还有{len(elems)-5}个")
+
+    if narration_json_path and os.path.exists(narration_json_path):
+        print(f"   📝 {os.path.basename(narration_json_path)}  (旁白)")
+
+    tts_dir = os.path.join(slide_dir, "tts")
+    if os.path.isdir(tts_dir):
+        wav_files = [f for f in os.listdir(tts_dir) if f.endswith('.wav')]
+        print(f"   🔊 tts/  ({len(wav_files)}个音频)")
+
+    anim_dir = os.path.join(slide_dir, "animation")
+    if os.path.isdir(anim_dir):
+        anim_files = os.listdir(anim_dir)
+        print(f"   🎬 animation/  ({len(anim_files)}个文件)")
+
+    print()
 
 
 if __name__ == "__main__":

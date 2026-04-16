@@ -1,0 +1,143 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 230 25% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 230 25% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 230 25% 12%;
+    --primary: 245 58% 51%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 10% 95%;
+    --secondary-foreground: 230 25% 12%;
+    --muted: 240 10% 96%;
+    --muted-foreground: 230 10% 46%;
+    --accent: 240 10% 94%;
+    --accent-foreground: 230 25% 12%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 60% 40%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+    --info: 210 100% 50%;
+    --info-foreground: 0 0% 100%;
+    --surface: 240 6% 97%;
+    --surface-elevated: 0 0% 100%;
+    --border: 240 6% 90%;
+    --input: 240 6% 90%;
+    --ring: 245 58% 51%;
+    --radius: 0.625rem;
+
+    --gradient-primary: linear-gradient(135deg, hsl(245 58% 51%), hsl(270 65% 58%));
+    --gradient-surface: linear-gradient(180deg, hsl(240 6% 97%), hsl(240 6% 94%));
+    --gradient-accent: linear-gradient(135deg, hsl(245 58% 51% / 0.08), hsl(270 65% 58% / 0.05));
+
+    --shadow-glow: 0 0 24px hsl(245 58% 51% / 0.15);
+    --shadow-elegant: 0 8px 32px -8px hsl(230 25% 12% / 0.12);
+    --shadow-card-hover: 0 12px 40px -12px hsl(230 25% 12% / 0.18);
+  }
+
+  .dark {
+    --background: 228 22% 8%;
+    --foreground: 220 14% 90%;
+    --card: 228 20% 11%;
+    --card-foreground: 220 14% 90%;
+    --popover: 228 20% 11%;
+    --popover-foreground: 220 14% 90%;
+    --primary: 245 72% 65%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 228 16% 16%;
+    --secondary-foreground: 220 14% 85%;
+    --muted: 228 14% 14%;
+    --muted-foreground: 220 10% 55%;
+    --accent: 228 16% 18%;
+    --accent-foreground: 220 14% 90%;
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 55% 48%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 55%;
+    --warning-foreground: 0 0% 10%;
+    --info: 210 100% 60%;
+    --info-foreground: 0 0% 100%;
+    --surface: 228 18% 12%;
+    --surface-elevated: 228 20% 14%;
+    --border: 228 14% 18%;
+    --input: 228 14% 18%;
+    --ring: 245 72% 65%;
+
+    --gradient-primary: linear-gradient(135deg, hsl(245 72% 65%), hsl(270 65% 68%));
+    --gradient-surface: linear-gradient(180deg, hsl(228 18% 12%), hsl(228 18% 10%));
+    --gradient-accent: linear-gradient(135deg, hsl(245 72% 65% / 0.1), hsl(270 65% 68% / 0.06));
+
+    --shadow-glow: 0 0 24px hsl(245 72% 65% / 0.2);
+    --shadow-elegant: 0 8px 32px -8px hsl(0 0% 0% / 0.4);
+    --shadow-card-hover: 0 12px 40px -12px hsl(0 0% 0% / 0.5);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}
+
+@layer utilities {
+  .gradient-primary {
+    background: var(--gradient-primary);
+  }
+  .gradient-surface {
+    background: var(--gradient-surface);
+  }
+  .gradient-accent {
+    background: var(--gradient-accent);
+  }
+  .text-gradient {
+    background: var(--gradient-primary);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .glass {
+    backdrop-filter: blur(12px) saturate(180%);
+    -webkit-backdrop-filter: blur(12px) saturate(180%);
+  }
+  .progress-striped {
+    background-image: linear-gradient(
+      45deg,
+      hsla(0, 0%, 100%, 0.1) 25%,
+      transparent 25%,
+      transparent 50%,
+      hsla(0, 0%, 100%, 0.1) 50%,
+      hsla(0, 0%, 100%, 0.1) 75%,
+      transparent 75%,
+      transparent
+    );
+    background-size: 1rem 1rem;
+  }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
+}

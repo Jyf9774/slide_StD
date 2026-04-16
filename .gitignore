@@ -8,6 +8,8 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+.claude/
+.qoder/
 *.swp
 *.swo
 
@@ -34,9 +36,20 @@ venv3/
 output/
 *.pptx
 
+# Models (large binary files)
+models/*.pt
+
 # Logs
 logs/
 *.log
+
+# Uploads
+uploads/
+
+# Node.js (frontend)
+node_modules/
+web/frontend/dist/
+web/frontend/tsconfig.app.tsbuildinfo
 
 # Keys
 key_manage.py

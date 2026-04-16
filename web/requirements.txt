@@ -1,0 +1,45 @@
+# StD Web Dashboard - 依赖清单
+# 包含后端 (Python) 和前端 (Node.js) 两部分
+
+# ============================================
+# 后端 Python 依赖（pip install）
+# ============================================
+
+# Web 框架
+fastapi>=0.104
+uvicorn>=0.24
+pydantic>=2.5
+
+# 文件上传 & WebSocket
+python-multipart>=0.0.6
+websockets>=12.0
+
+# 注意：后端还依赖项目根目录 requirements.txt 中的核心包
+# （pipeline, narration_generator, media 等模块）
+
+# ============================================
+# 前端 Node.js 依赖（npm install）
+# ============================================
+# 安装方式：cd web/frontend && npm install
+#
+# --- 核心框架 ---
+# react ^18.3.1
+# react-dom ^18.3.1
+# react-router-dom ^7.1.1
+#
+# --- UI & 样式 ---
+# class-variance-authority ^0.7.1
+# clsx ^2.1.1
+# lucide-react ^0.468.0
+# tailwind-merge ^2.6.0
+# tailwindcss-animate ^1.0.7
+#
+# --- 构建工具 (devDependencies) ---
+# @types/react ^18.3.18
+# @types/react-dom ^18.3.5
+# @vitejs/plugin-react ^4.3.4
+# autoprefixer ^10.4.20
+# postcss ^8.4.49
+# tailwindcss ^3.4.17
+# typescript ~5.6.2
+# vite ^6.0.5

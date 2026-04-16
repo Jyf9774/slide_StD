@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-幻灯片截图分割与PPTX还原数据流水线 v3.0
+幻灯片截图分割与PPTX还原数据流水线 v3.2
 Slide Screenshot Segmentation and PPTX Reconstruction Pipeline
 
 核心优化：
-1. 使用GPT-4.1视觉能力替代传统OCR和规则分类
-2. 原图作为背景，元素位置用背景色遮罩后放置提取元素
-3. 简化CV流程，仅保留边界框检测
+1. 优先使用Qwen3.6-Plus大模型Grounding能力检测元素，避免传统CV过度分割问题
+2. 大模型直接返回元素边界框、类型、文本内容，智能合并相关内容块
+3. 传统CV仅作为fallback方案
+4. 原图作为背景，元素位置用背景色遮罩后放置提取元素
 """
 
 import os
 import json
 import hashlib
-import base64
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Any
@@ -23,57 +23,26 @@ import cv2
 import numpy as np
 from PIL import Image
 from pptx import Presentation
-from pptx.util import Inches, Pt, Emu
+from pptx.util import Inches, Emu
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE_TYPE
 
-# ============ GPT-4.1 集成 ============
-
-def get_gpt_client():
-    """获取Azure OpenAI客户端"""
-    try:
-        from openai import AzureOpenAI
-        from key_manage import Azure_GPT_4_1_Key
-        
-        client = AzureOpenAI(
-            api_version="2024-12-01-preview",
-            api_key=Azure_GPT_4_1_Key,
-            azure_endpoint="https://admin-m9uwcx36-eastus2.cognitiveservices.azure.com/"
-        )
-        return client
-    except ImportError:
-        print("警告: 未找到key_manage模块，将使用传统CV/OCR方法")
-        return None
-    except Exception as e:
-        print(f"警告: GPT客户端初始化失败 ({e})，将使用传统方法")
-        return None
-
-
-def image_to_base64(image_path: str) -> str:
-    """将图片转换为base64"""
-    with open(image_path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
-
-
-def numpy_to_base64(image_array: np.ndarray) -> str:
-    """将numpy数组转换为base64"""
-    # RGB转BGR（OpenCV格式）
-    if len(image_array.shape) == 3 and image_array.shape[2] == 3:
-        image_bgr = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
-    else:
-        image_bgr = image_array
-    
-    _, buffer = cv2.imencode('.png', image_bgr)
-    return base64.b64encode(buffer).decode("utf-8")
+# 导入统一的GPT客户端和Prompt仓库
+from openai_client import (
+    get_gpt_client,
+    encode_image_to_base64,
+    encode_numpy_image_to_base64,
+    DEFAULT_MODEL
+)
+import prompts
 
 
 class GPTAnalyzer:
     """GPT-4.1 视觉分析器"""
-    
+
     def __init__(self, client=None):
         self.client = client or get_gpt_client()
         self.enabled = self.client is not None
-    
+
     def analyze_slide(self, image_path: str) -> Dict:
         """
         分析整张幻灯片
@@ -81,39 +50,23 @@ class GPTAnalyzer:
         """
         if not self.enabled:
             return {}
-        
-        base64_image = image_to_base64(image_path)
-        
-        prompt = """请分析这张幻灯片截图，返回JSON格式的分析结果：
 
-{
-    "background_color": "#RRGGBB格式的背景色，优先识别主要背景区域的颜色",
-    "title": "幻灯片的主标题文本",
-    "subtitle": "副标题（如果有）",
-    "slide_type": "封面页/内容页/图表页/结束页 等",
-    "main_language": "中文/英文/中英混合",
-    "description": "用1-2句话描述这张幻灯片的主要内容",
-    "key_points": ["要点1", "要点2", "..."]
-}
-
-注意：
-1. 背景色请识别幻灯片的主要背景区域（通常是白色或浅色），忽略边缘装饰
-2. 只返回JSON，不要其他文字"""
+        base64_image = encode_image_to_base64(image_path)
 
         try:
             resp = self.client.chat.completions.create(
-                model="gpt-4.1",
+                model=DEFAULT_MODEL,
                 messages=[
-                    {"role": "system", "content": "你是一个专业的幻灯片分析助手，擅长识别和提取幻灯片中的结构化信息。"},
+                    {"role": "system", "content": prompts.SYSTEM_PROMPT_ANALYZE_SLIDE},
                     {"role": "user", "content": [
-                        {"type": "text", "text": prompt},
+                        {"type": "text", "text": prompts.PROMPT_ANALYZE_SLIDE},
                         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
                     ]}
                 ],
                 temperature=0.1,
                 max_tokens=1000
             )
-            
+
             result_text = resp.choices[0].message.content.strip()
             # 清理可能的markdown代码块
             if result_text.startswith("```"):
@@ -121,12 +74,12 @@ class GPTAnalyzer:
                 if result_text.startswith("json"):
                     result_text = result_text[4:]
             result_text = result_text.strip()
-            
+
             return json.loads(result_text)
         except Exception as e:
             print(f"GPT分析幻灯片失败: {e}")
             return {}
-    
+
     def analyze_element(self, element_image: np.ndarray, context: str = "") -> Dict:
         """
         分析单个元素区域
@@ -134,39 +87,18 @@ class GPTAnalyzer:
         """
         if not self.enabled:
             return {}
-        
-        base64_image = numpy_to_base64(element_image)
-        
-        prompt = f"""请分析这个幻灯片元素区域，返回JSON格式的分析结果：
 
-{{
-    "type": "text/image/chart/table/logo/diagram/decoration",
-    "text_content": "提取所有可见文本，保持原始换行格式",
-    "description": "简短描述这个元素的内容",
-    "is_title": true/false,
-    "estimated_font_size": 数字（估计的主要字体大小，单位pt）,
-    "text_color": "#RRGGBB格式的主要文字颜色",
-    "has_border": true/false
-}}
+        base64_image = encode_numpy_image_to_base64(element_image)
 
-{f'上下文信息：{context}' if context else ''}
-
-类型说明：
-- text: 纯文本区域
-- image: 图片/照片
-- chart: 图表（柱状图、折线图等）
-- table: 表格
-- logo: 标志/图标
-- diagram: 示意图/流程图
-- decoration: 装饰元素
-
-只返回JSON，不要其他文字。"""
+        prompt = prompts.PROMPT_ANALYZE_ELEMENT
+        if context:
+            prompt += f"\n上下文信息：{context}"
 
         try:
             resp = self.client.chat.completions.create(
-                model="gpt-4.1",
+                model=DEFAULT_MODEL,
                 messages=[
-                    {"role": "system", "content": "你是一个OCR和图像分析专家，擅长识别图像中的文字和元素类型。"},
+                    {"role": "system", "content": prompts.SYSTEM_PROMPT_ANALYZE_ELEMENT},
                     {"role": "user", "content": [
                         {"type": "text", "text": prompt},
                         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
@@ -175,14 +107,14 @@ class GPTAnalyzer:
                 temperature=0.1,
                 max_tokens=800
             )
-            
+
             result_text = resp.choices[0].message.content.strip()
             if result_text.startswith("```"):
                 result_text = result_text.split("```")[1]
                 if result_text.startswith("json"):
                     result_text = result_text[4:]
             result_text = result_text.strip()
-            
+
             return json.loads(result_text)
         except Exception as e:
             print(f"GPT分析元素失败: {e}")
@@ -195,6 +127,79 @@ class GPTAnalyzer:
             result = self.analyze_element(img, context)
             results.append(result)
         return results
+
+    def detect_elements_grounding(self, image_path: str, image_width: int, image_height: int) -> List[Dict]:
+        """
+        使用大模型Grounding能力检测整张幻灯片的所有元素
+        返回元素列表，每个元素包含：bbox坐标(x, y, width, height)、type、text_content、is_title等信息
+        """
+        if not self.enabled:
+            return []
+
+        base64_image = encode_image_to_base64(image_path)
+
+        prompt = f"""
+你是专业的幻灯片元素检测专家，请分析这张幻灯片图片，识别出所有的可视元素。
+
+要求：
+1. 识别所有元素：包括文本块、标题、图片、图表、表格、Logo、装饰元素等
+2. 每个元素返回精确的边界框坐标：左上角x, 左上角y, 宽度width, 高度height
+   - 坐标值必须是整数，基于图片实际尺寸：宽度{image_width}px，高度{image_height}px
+   - 边界框要完整包围元素，不要太小或太大
+3. 每个元素需要分类：
+   - text: 纯文本内容（如果是大标题，is_title设为true）
+   - image: 图片、照片、插图
+   - chart: 柱状图、折线图、饼图等图表
+   - table: 表格
+   - diagram: 流程图、架构图等图示
+   - logo: 标志、图标
+   - decoration: 装饰性元素、分割线等
+   - mixed: 混合内容
+4. 对于文本元素，提取完整的文本内容
+5. 对于其他类型元素，给出简单描述
+6. 尽量合并同一语义块的内容，不要过度分割，比如一个完整的段落不要拆分成多个元素
+7. 忽略非常小的装饰性元素（小于20x20像素的可以忽略）
+
+返回格式：严格是JSON数组，不需要任何其他内容，不要markdown代码块标记。
+每个元素的格式：
+{{
+  "bbox": [x, y, width, height],
+  "type": "元素类型",
+  "text_content": "文本内容（文本元素必填，其他类型可选）",
+  "is_title": false,
+  "description": "元素描述（非文本元素必填）",
+  "confidence": 0.95
+}}
+"""
+
+        try:
+            resp = self.client.chat.completions.create(
+                model=DEFAULT_MODEL,
+                messages=[
+                    {"role": "system", "content": "你是专业的幻灯片分析专家，返回严格的JSON格式数据。"},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
+                    ]}
+                ],
+                temperature=0.1,
+                max_tokens=2000
+            )
+
+            result_text = resp.choices[0].message.content.strip()
+            # 清理可能的markdown代码块
+            if result_text.startswith("```"):
+                result_text = result_text.split("```")[1]
+                if result_text.startswith("json"):
+                    result_text = result_text[4:]
+            result_text = result_text.strip()
+
+            import json
+            elements = json.loads(result_text)
+            return elements
+        except Exception as e:
+            print(f"大模型Grounding检测失败: {e}")
+            return []
 
 
 # ============ 传统方法备用 ============
@@ -434,19 +439,47 @@ class SlideMetadata:
 
 class SlideSegmenter:
     """幻灯片分割器"""
-    
-    def __init__(self, 
-                 min_area: int = 500,
-                 merge_threshold: int = 15,
-                 use_gpt: bool = True):
-        self.min_area = min_area
-        self.merge_threshold = merge_threshold
+
+    def __init__(self,
+                 min_area: int = 1500,
+                 merge_threshold: int = 25,
+                 use_gpt: bool = True,
+                 detail_level: str = "standard"):
+        """
+        Args:
+            min_area: 最小元素面积，小于这个值的区域会被过滤
+            merge_threshold: 合并阈值，小于这个距离的相邻元素会被考虑合并
+            use_gpt: 是否使用GPT分析
+            detail_level: 分割精细度: "fine"(精细)/"standard"(标准)/"coarse"(粗略)
+        """
+        self.detail_level = detail_level.lower()
+
+        # 根据精细度调整基础参数
+        if self.detail_level == "fine":
+            self.min_area = min_area or 200
+            self.merge_threshold = merge_threshold or 25
+            self.dilate_iterations = 1
+            self.canny_low = 20
+            self.canny_high = 100
+        elif self.detail_level == "coarse":
+            self.min_area = min_area or 500
+            self.merge_threshold = merge_threshold or 50
+            self.dilate_iterations = 2
+            self.canny_low = 30
+            self.canny_high = 120
+        else: # standard
+            self.min_area = min_area or 300
+            self.merge_threshold = merge_threshold or 35
+            self.dilate_iterations = 1
+            self.canny_low = 25
+            self.canny_high = 110
+
         self.use_gpt = use_gpt
-        
+
         # 初始化分析器
         self.gpt_analyzer = GPTAnalyzer() if use_gpt else None
         self.fallback_analyzer = FallbackAnalyzer()
-        
+
         # 判断是否可以使用GPT
         self.gpt_available = self.gpt_analyzer and self.gpt_analyzer.enabled
         if use_gpt and not self.gpt_available:
@@ -483,21 +516,40 @@ class SlideSegmenter:
         
         bg_palette = [bg_color]
         
-        # ====== CV检测区域边界框 ======
-        regions = self._detect_regions(image)
-        merged_regions = self._merge_overlapping_regions(regions)
-        
-        # ====== 处理每个区域 ======
-        elements = []
-        for idx, bbox in enumerate(merged_regions):
-            element = self._process_region(
-                image_rgb, bbox, idx, 
-                str(elements_dir), slide_id,
-                slide_analysis.get('title', '')
-            )
-            if element:
-                elements.append(element)
-        
+        # ====== 优先使用大模型Grounding检测元素 ======
+        raw_elements = []
+        if self.use_gpt and self.gpt_available:
+            print("使用大模型Grounding检测元素...")
+            grounding_elements = self._gpt_grounding_detection(image_path, image_rgb, str(elements_dir), slide_id)
+            if grounding_elements:
+                raw_elements = grounding_elements
+                print(f"大模型检测到 {len(raw_elements)} 个元素")
+
+        # ====== Fallback: 使用传统CV检测 ======
+        if not raw_elements:
+            print("使用传统CV检测元素...")
+            regions = self._detect_regions(image)
+            print(f"CV检测到 {len(regions)} 个候选区域")
+
+            for idx, bbox in enumerate(regions):
+                element = self._process_region(
+                    image_rgb, bbox, idx,
+                    str(elements_dir), slide_id,
+                    slide_analysis.get('title', '')
+                )
+                if element:
+                    raw_elements.append(element)
+
+            # ====== 智能合并同类型相邻区域 ======
+            elements = self._smart_merge_elements(raw_elements)
+            print(f"智能合并后剩余 {len(elements)} 个元素")
+
+            # ====== 后处理：过滤和优化元素 ======
+            elements = self._post_process_elements(elements)
+            print(f"后处理后剩余 {len(elements)} 个元素")
+        else:
+            elements = raw_elements
+
         # 排序
         elements.sort(key=lambda e: (e.bbox.y, e.bbox.x))
         for idx, elem in enumerate(elements):
@@ -542,84 +594,291 @@ class SlideSegmenter:
         return hashlib.md5(content.encode()).hexdigest()[:12]
     
     def _detect_regions(self, image: np.ndarray) -> List[BoundingBox]:
-        """CV检测区域边界框"""
+        """CV检测区域边界框（优化版，减少细碎区域）"""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         h, w = image.shape[:2]
-        
-        # 自适应阈值 + Canny边缘
+
+        # 自适应阈值（提高灵敏度）
         binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                         cv2.THRESH_BINARY_INV, 11, 2)
-        edges = cv2.Canny(gray, 50, 150)
+
+        # Canny边缘检测（使用动态阈值，降低阈值提高灵敏度）
+        edges = cv2.Canny(gray, self.canny_low, self.canny_high)
         combined = cv2.bitwise_or(binary, edges)
-        
-        # 形态学操作
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 8))
-        dilated = cv2.dilate(combined, kernel, iterations=2)
-        closed = cv2.morphologyEx(dilated, cv2.MORPH_CLOSE, 
-                                   cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10)))
-        
+
+        # 形态学操作（调整kernel大小，平衡合并效果和区域完整性）
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (12, 4))
+        dilated = cv2.dilate(combined, kernel, iterations=self.dilate_iterations)
+        closed = cv2.morphologyEx(dilated, cv2.MORPH_CLOSE,
+                                   cv2.getStructuringElement(cv2.MORPH_RECT, (6, 6)))
+
         contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+
         regions = []
         for contour in contours:
             x, y, cw, ch = cv2.boundingRect(contour)
             area = cw * ch
-            
-            if area < self.min_area or area > 0.95 * w * h:
+
+            if area < self.min_area or area > 0.98 * w * h:
                 continue
-            
+
             aspect = cw / ch if ch > 0 else 0
-            if aspect > 20 or aspect < 0.05:
+            # 稍微严格的宽高比过滤，去掉极端细长的元素
+            if aspect > 25 or aspect < 0.04:
                 continue
-            
-            padding = 8
+
+            padding = 8  # 增加padding，让边界框包含更多上下文，方便后续合并
             x = max(0, x - padding)
             y = max(0, y - padding)
             cw = min(w - x, cw + 2 * padding)
             ch = min(h - y, ch + 2 * padding)
-            
+
             regions.append(BoundingBox(x, y, cw, ch))
-        
+
+        # 先进行一次简单的重叠合并，去掉完全包含在其他区域内的小区域
+        regions = self._remove_nested_regions(regions)
+
         return regions
+
+    def _remove_nested_regions(self, regions: List[BoundingBox]) -> List[BoundingBox]:
+        """移除完全被其他区域包含的嵌套小区域"""
+        if len(regions) <= 1:
+            return regions
+
+        # 按面积从大到小排序
+        sorted_regions = sorted(regions, key=lambda r: -r.area)
+        kept = []
+
+        for region in sorted_regions:
+            # 检查当前区域是否被已经保留的区域完全包含
+            nested = False
+            for kept_region in kept:
+                if (kept_region.x <= region.x and
+                    kept_region.y <= region.y and
+                    kept_region.x2 >= region.x2 and
+                    kept_region.y2 >= region.y2):
+                    nested = True
+                    break
+
+            if not nested:
+                kept.append(region)
+
+        # 恢复原来的顺序（按位置排序）
+        kept.sort(key=lambda r: (r.y, r.x))
+        return kept
     
     def _merge_overlapping_regions(self, regions: List[BoundingBox]) -> List[BoundingBox]:
-        """合并重叠区域"""
+        """旧的粗暴合并方法，已废弃，保留用于兼容"""
         if not regions:
             return []
-        
+
         boxes = [[r.x, r.y, r.x2, r.y2] for r in regions]
-        
+
         merged = True
         while merged:
             merged = False
             new_boxes = []
             used = set()
-            
+
             for i, box1 in enumerate(boxes):
                 if i in used:
                     continue
                 x1, y1, x2, y2 = box1
-                
+
                 for j, box2 in enumerate(boxes[i+1:], i+1):
                     if j in used:
                         continue
                     bx1, by1, bx2, by2 = box2
-                    
-                    if (x1 - self.merge_threshold <= bx2 and 
+
+                    if (x1 - self.merge_threshold <= bx2 and
                         x2 + self.merge_threshold >= bx1 and
-                        y1 - self.merge_threshold <= by2 and 
+                        y1 - self.merge_threshold <= by2 and
                         y2 + self.merge_threshold >= by1):
                         x1, y1 = min(x1, bx1), min(y1, by1)
                         x2, y2 = max(x2, bx2), max(y2, by2)
                         used.add(j)
                         merged = True
-                
+
                 new_boxes.append([x1, y1, x2, y2])
                 used.add(i)
-            
+
             boxes = new_boxes
-        
+
         return [BoundingBox(b[0], b[1], b[2]-b[0], b[3]-b[1]) for b in boxes]
+
+    def _smart_merge_elements(self, elements: List[SlideElement]) -> List[SlideElement]:
+        """
+        智能合并元素（增强版）：
+        1. 先过滤掉无用的小装饰元素
+        2. 图片/图表/表格/Logo等实体元素不合并
+        3. 文本元素智能合并：同一行文本自动合并，相邻行的段落自动合并
+        4. 混合类型元素如果内容相关也可以合并
+        """
+        if len(elements) <= 1:
+            return elements
+
+        # 第一步：先过滤掉太小的装饰性元素
+        filtered_elements = []
+        min_area_for_decoration = self.min_area * 2  # 装饰元素需要至少是最小面积的2倍才保留
+        for elem in elements:
+            # 装饰元素特别小的直接过滤
+            if elem.type == ElementType.DECORATION and elem.bbox.area < min_area_for_decoration:
+                continue
+            # 其他类型元素如果面积特别小（小于最小面积的一半）也过滤
+            if elem.bbox.area < self.min_area * 0.5:
+                continue
+            filtered_elements.append(elem)
+
+        if len(filtered_elements) <= 1:
+            return filtered_elements
+
+        # 按y坐标排序，从上到下处理
+        elements = sorted(filtered_elements, key=lambda e: (e.bbox.y, e.bbox.x))
+
+        merged = []
+        used = set()
+
+        for i, elem1 in enumerate(elements):
+            if i in used:
+                continue
+
+            # 图片/图表/表格/Logo/图示类型不合并，直接保留
+            if elem1.type in [ElementType.IMAGE, ElementType.CHART, ElementType.TABLE,
+                              ElementType.LOGO, ElementType.DIAGRAM]:
+                merged.append(elem1)
+                used.add(i)
+                continue
+
+            current_elem = elem1
+            used.add(i)
+
+            # 查找可以合并的相邻元素
+            for j, elem2 in enumerate(elements[i+1:], i+1):
+                if j in used:
+                    continue
+
+                bbox1 = current_elem.bbox
+                bbox2 = elem2.bbox
+
+                # 检查是否距离太远
+                horizontal_dist = max(0, max(bbox1.x, bbox2.x) - min(bbox1.x2, bbox2.x2))
+                vertical_dist = max(0, max(bbox1.y, bbox2.y) - min(bbox1.y2, bbox2.y2))
+
+                if (horizontal_dist > self.merge_threshold * 2 or
+                    vertical_dist > self.merge_threshold * 3):
+                    continue
+
+                # 类型兼容性检查
+                type_compatible = False
+                # 完全相同类型
+                if elem2.type == current_elem.type:
+                    type_compatible = True
+                # 文本和混合类型可以互相合并
+                elif {current_elem.type, elem2.type} <= {ElementType.TEXT, ElementType.MIXED}:
+                    type_compatible = True
+                # 两个都是装饰类型也可以合并
+                elif current_elem.type == ElementType.DECORATION and elem2.type == ElementType.DECORATION:
+                    type_compatible = True
+
+                if not type_compatible:
+                    continue
+
+                # 文本/混合类型额外判断
+                if current_elem.type in [ElementType.TEXT, ElementType.MIXED]:
+                    height1 = bbox1.height
+                    height2 = bbox2.height
+                    max_height = max(height1, height2)
+                    min_height = min(height1, height2)
+
+                    # 高度差不能太大
+                    if max_height > min_height * 2.5:
+                        continue
+
+                    # 判断是水平相邻（同一行）还是垂直相邻（上下行）
+                    y_center1 = bbox1.y + height1 / 2
+                    y_center2 = bbox2.y + height2 / 2
+                    y_center_diff = abs(y_center1 - y_center2)
+
+                    # 同一行文本（y中心差小于行高的50%）
+                    if y_center_diff < max_height * 0.5:
+                        # 同一行的文本，只要水平距离不太大都可以合并
+                        if horizontal_dist > self.merge_threshold * 3:
+                            continue
+                    # 上下行文本（垂直距离小于行高的2倍）
+                    elif vertical_dist < max_height * 2.0:
+                        # 上下行的文本，水平方向需要有一定重叠
+                        x_overlap = min(bbox1.x2, bbox2.x2) - max(bbox1.x, bbox2.x)
+                        min_width = min(bbox1.width, bbox2.width)
+                        if x_overlap < -min_width * 0.2:  # 允许稍微错开20%
+                            continue
+                    else:
+                        # 既不在同一行也不是相邻行，不合并
+                        continue
+
+                # 可以合并，合并两个元素
+                new_bbox = BoundingBox(
+                    x=min(bbox1.x, bbox2.x),
+                    y=min(bbox1.y, bbox2.y),
+                    width=max(bbox1.x2, bbox2.x2) - min(bbox1.x, bbox2.x),
+                    height=max(bbox1.y2, bbox2.y2) - min(bbox1.y, bbox2.y)
+                )
+
+                # 合并文本内容，用换行分隔
+                combined_text = []
+                if current_elem.text_content:
+                    combined_text.append(current_elem.text_content)
+                if elem2.text_content:
+                    combined_text.append(elem2.text_content)
+                combined_text = "\n".join(combined_text).strip()
+
+                # 合并描述
+                combined_description = []
+                if current_elem.description:
+                    combined_description.append(current_elem.description)
+                if elem2.description:
+                    combined_description.append(elem2.description)
+                combined_description = " ".join(combined_description).strip()
+
+                # 更新当前元素的属性
+                current_elem.bbox = new_bbox
+                current_elem.text_content = combined_text
+                current_elem.description = combined_description
+
+                # 类型如果一个是TEXT一个是MIXED，取TEXT
+                if current_elem.type == ElementType.MIXED and elem2.type == ElementType.TEXT:
+                    current_elem.type = ElementType.TEXT
+                elif current_elem.type == ElementType.TEXT and elem2.type == ElementType.MIXED:
+                    current_elem.type = ElementType.TEXT  # 保持TEXT类型
+
+                # 保留更可能是标题的属性
+                current_elem.is_title = current_elem.is_title or elem2.is_title
+
+                # 字体大小取较大的那个（通常标题字体更大）
+                current_elem.font_size_estimate = max(current_elem.font_size_estimate,
+                                                     elem2.font_size_estimate)
+
+                # 置信度取平均值
+                current_elem.confidence = (current_elem.confidence + elem2.confidence) / 2
+
+                # 合并主要颜色
+                current_elem.dominant_colors = list(set(current_elem.dominant_colors + elem2.dominant_colors))[:3]
+
+                used.add(j)
+
+            merged.append(current_elem)
+
+        # 二次过滤：合并后再次检查有没有太小的元素
+        final_merged = []
+        for elem in merged:
+            if elem.bbox.area >= self.min_area * 0.7:  # 允许稍微小于最小面积
+                final_merged.append(elem)
+
+        # 重新排序和分配z_order
+        final_merged.sort(key=lambda e: (e.bbox.y, e.bbox.x))
+        for idx, elem in enumerate(final_merged):
+            elem.z_order = idx
+
+        return final_merged
     
     def _process_region(self, image_rgb: np.ndarray, bbox: BoundingBox, 
                         idx: int, output_dir: str, slide_id: str,
@@ -783,6 +1042,168 @@ class SlideSegmenter:
         ]
         return sum(s > 0.3 for s in scores) >= 3
     
+    def _post_process_elements(self, elements: List[SlideElement]) -> List[SlideElement]:
+        """
+        后处理元素：
+        1. 过滤掉完全没有内容的元素
+        2. 合并高度重叠的元素
+        3. 调整元素属性
+        """
+        if len(elements) <= 1:
+            return elements
+
+        # 第一步：过滤没有内容的元素
+        filtered = []
+        for elem in elements:
+            # 如果是文本/混合类型，完全没有文本内容且面积很小，过滤
+            if elem.type in [ElementType.TEXT, ElementType.MIXED]:
+                if not elem.text_content and elem.bbox.area < self.min_area * 1.5:
+                    continue
+            # 装饰元素没有边框且面积很小，过滤
+            if elem.type == ElementType.DECORATION and not elem.has_border and elem.bbox.area < self.min_area * 2:
+                continue
+            filtered.append(elem)
+
+        if len(filtered) <= 1:
+            return filtered
+
+        # 第二步：合并高度重叠的元素
+        # 按面积从大到小排序
+        sorted_by_area = sorted(filtered, key=lambda e: -e.bbox.area)
+        kept = []
+        used = set()
+
+        for i, elem1 in enumerate(sorted_by_area):
+            if i in used:
+                continue
+
+            current = elem1
+            used.add(i)
+
+            for j, elem2 in enumerate(sorted_by_area[i+1:], i+1):
+                if j in used:
+                    continue
+
+                bbox1 = current.bbox
+                bbox2 = elem2.bbox
+
+                # 计算重叠面积
+                x_overlap = max(0, min(bbox1.x2, bbox2.x2) - max(bbox1.x, bbox2.x))
+                y_overlap = max(0, min(bbox1.y2, bbox2.y2) - max(bbox1.y, bbox2.y))
+                overlap_area = x_overlap * y_overlap
+
+                # 如果重叠面积超过小元素面积的70%，合并
+                min_area = min(bbox1.area, bbox2.area)
+                if overlap_area > min_area * 0.7:
+                    # 合并到较大的元素
+                    new_bbox = BoundingBox(
+                        x=min(bbox1.x, bbox2.x),
+                        y=min(bbox1.y, bbox2.y),
+                        width=max(bbox1.x2, bbox2.x2) - min(bbox1.x, bbox2.x),
+                        height=max(bbox1.y2, bbox2.y2) - min(bbox1.y, bbox2.y)
+                    )
+                    current.bbox = new_bbox
+
+                    # 合并文本内容
+                    if elem2.text_content and elem2.text_content not in current.text_content:
+                        current.text_content = f"{current.text_content}\n{elem2.text_content}".strip()
+
+                    # 合并描述
+                    if elem2.description and elem2.description not in current.description:
+                        current.description = f"{current.description} {elem2.description}".strip()
+
+                    # 保留更可能是标题的属性
+                    current.is_title = current.is_title or elem2.is_title
+
+                    used.add(j)
+
+            kept.append(current)
+
+        # 恢复按位置排序
+        kept.sort(key=lambda e: (e.bbox.y, e.bbox.x))
+        return kept
+
+    def _gpt_grounding_detection(self, image_path: str, image_rgb: np.ndarray, elements_dir: str, slide_id: str) -> List[SlideElement]:
+        """使用大模型Grounding检测元素，直接返回SlideElement列表"""
+        height, width = image_rgb.shape[:2]
+
+        # 调用大模型Grounding检测
+        elements_data = self.gpt_analyzer.detect_elements_grounding(image_path, width, height)
+        if not elements_data:
+            return []
+
+        elements = []
+        for idx, elem_data in enumerate(elements_data):
+            try:
+                # 解析边界框
+                bbox_data = elem_data.get("bbox", [0, 0, 0, 0])
+                x, y, w, h = map(int, bbox_data)
+
+                # 坐标合法性检查
+                x = max(0, x)
+                y = max(0, y)
+                w = min(width - x, w)
+                h = min(height - y, h)
+
+                if w <= 0 or h <= 0 or w * h < self.min_area:
+                    continue
+
+                bbox = BoundingBox(x, y, w, h)
+
+                # 裁剪元素图像
+                crop = image_rgb[y:y+h, x:x+w]
+                if crop.size == 0:
+                    continue
+
+                # 元素类型
+                elem_type_str = elem_data.get("type", "mixed").lower()
+                try:
+                    elem_type = ElementType(elem_type_str)
+                except ValueError:
+                    elem_type = ElementType.MIXED
+
+                # 生成元素名称
+                text_content = elem_data.get("text_content", "")
+                is_title = elem_data.get("is_title", False)
+                element_name = self._generate_element_name(idx, elem_type_str, text_content, is_title)
+                element_id = f"{slide_id}_{element_name}"
+
+                # 保存元素图像
+                image_filename = f"{element_name}.png"
+                image_path = os.path.join(elements_dir, image_filename)
+                Image.fromarray(crop).save(image_path)
+
+                # 创建SlideElement
+                element = SlideElement(
+                    id=element_id,
+                    name=element_name,
+                    type=elem_type,
+                    bbox=bbox,
+                    image_path=f"elements/{image_filename}",
+                    text_content=text_content,
+                    confidence=elem_data.get("confidence", 0.9),
+                    is_title=is_title,
+                    description=elem_data.get("description", ""),
+                    font_size_estimate=self._estimate_font_size(crop, text_content)
+                )
+
+                elements.append(element)
+            except Exception as e:
+                print(f"处理大模型检测到的元素失败: {e}")
+                continue
+
+        return elements
+
+    def _estimate_font_size(self, crop: np.ndarray, text_content: str) -> int:
+        """估算文本元素的字体大小"""
+        if not text_content:
+            return 12
+        h = crop.shape[0]
+        lines = len(text_content.split("\n"))
+        if lines == 0:
+            lines = 1
+        return max(8, min(72, int(h / lines * 0.6)))
+
     def _calc_aspect_ratio(self, width: int, height: int) -> str:
         from math import gcd
         d = gcd(width, height)
@@ -925,29 +1346,40 @@ class SlideReconstructor:
 
 # ============ 便捷函数 ============
 
-def process_slide(image_path: str, 
+def process_slide(image_path: str,
                   output_base_dir: str = "./output",
                   use_gpt: bool = True,
                   use_original_bg: bool = True,
-                  mask_elements: bool = True) -> Tuple[str, str]:
+                  mask_elements: bool = True,
+                  detail_level: str = "standard",
+                  min_area: int = None,
+                  merge_threshold: int = None) -> Tuple[str, str]:
     """
     处理单张幻灯片
-    
+
     Args:
         image_path: 输入图像路径
         output_base_dir: 输出基础目录
         use_gpt: 是否使用GPT-4.1进行分析
         use_original_bg: 是否使用原图作为背景
         mask_elements: 是否在元素位置遮罩
-        
+        detail_level: 分割精细度: "fine"(精细)/"standard"(标准)/"coarse"(粗略)
+        min_area: 自定义最小元素面积（覆盖精细度的默认值）
+        merge_threshold: 自定义合并阈值（覆盖精细度的默认值）
+
     Returns:
         (json_path, pptx_path): JSON和PPTX文件路径
     """
     image_name = os.path.splitext(os.path.basename(image_path))[0]
     output_dir = os.path.join(output_base_dir, image_name)
-    
+
     # 分割
-    segmenter = SlideSegmenter(use_gpt=use_gpt)
+    segmenter = SlideSegmenter(
+        use_gpt=use_gpt,
+        detail_level=detail_level,
+        min_area=min_area,
+        merge_threshold=merge_threshold
+    )
     metadata = segmenter.segment(image_path, output_dir)
     
     json_path = os.path.join(output_dir, f"{metadata.slide_id}.json")
@@ -967,7 +1399,7 @@ if __name__ == "__main__":
     import sys
     
     print("""
-幻灯片分割与重建流水线 v3.0
+幻灯片分割与重建流水线 v3.1
 ===========================
 用法: python pipeline.py <image_path> [output_dir] [options]
 
@@ -975,43 +1407,79 @@ if __name__ == "__main__":
   --no-gpt        不使用GPT-4.1（使用传统CV/OCR）
   --no-bg         不使用原图作为背景
   --no-mask       不遮罩元素区域
+  --fine          精细分割模式（检测更多小元素）
+  --coarse        粗略分割模式（合并更多元素，减少分割数量）
+  --min-area N    自定义最小元素面积（默认根据精细度自动调整）
+  --merge-thresh N 自定义合并阈值（默认根据精细度自动调整）
 
 示例:
   python pipeline.py slide.png ./output
   python pipeline.py slide.png ./output --no-gpt
+  python pipeline.py slide.png ./output --coarse  # 粗略分割，减少元素数量
+  python pipeline.py slide.png ./output --fine    # 精细分割，保留更多细节
 """)
-    
+
     if len(sys.argv) < 2:
         sys.exit(1)
-    
+
     image_path = sys.argv[1]
     output_dir = "./output"
     use_gpt = True
     use_original_bg = True
     mask_elements = True
-    
-    for arg in sys.argv[2:]:
+    detail_level = "standard"
+    min_area = None
+    merge_threshold = None
+
+    i = 2
+    while i < len(sys.argv):
+        arg = sys.argv[i]
         if arg == "--no-gpt":
             use_gpt = False
         elif arg == "--no-bg":
             use_original_bg = False
         elif arg == "--no-mask":
             mask_elements = False
+        elif arg == "--fine":
+            detail_level = "fine"
+        elif arg == "--coarse":
+            detail_level = "coarse"
+        elif arg == "--min-area" and i + 1 < len(sys.argv):
+            try:
+                min_area = int(sys.argv[i+1])
+                i += 1
+            except ValueError:
+                print("警告: --min-area 参数需要是整数，使用默认值")
+        elif arg == "--merge-thresh" and i + 1 < len(sys.argv):
+            try:
+                merge_threshold = int(sys.argv[i+1])
+                i += 1
+            except ValueError:
+                print("警告: --merge-thresh 参数需要是整数，使用默认值")
         elif not arg.startswith("-"):
             output_dir = arg
+        i += 1
     
     print(f"处理图像: {image_path}")
     print(f"输出目录: {output_dir}")
     print(f"使用GPT: {use_gpt}")
     print(f"原图背景: {use_original_bg}")
     print(f"元素遮罩: {mask_elements}")
+    print(f"分割精细度: {detail_level}")
+    if min_area is not None:
+        print(f"自定义最小面积: {min_area}")
+    if merge_threshold is not None:
+        print(f"自定义合并阈值: {merge_threshold}")
     print()
-    
+
     json_path, pptx_path = process_slide(
         image_path, output_dir,
         use_gpt=use_gpt,
         use_original_bg=use_original_bg,
-        mask_elements=mask_elements
+        mask_elements=mask_elements,
+        detail_level=detail_level,
+        min_area=min_area,
+        merge_threshold=merge_threshold
     )
     
     print(f"\n处理完成!")
