@@ -37,7 +37,10 @@ output/
 *.pptx
 
 # Models (large binary files)
-models/*.pt
+# 注：DocLayout-YOLO 权重随仓库提交（~40MB），仅排除其他大模型文件
+models/*.pth
+models/*.bin
+models/*.safetensors
 
 # Logs
 logs/

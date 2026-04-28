@@ -80,13 +80,56 @@ brew install tesseract tesseract-lang    # macOS
 # apt install tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-eng  # Linux
 ```
 
-### 2. 配置 API Key
+### 2. 配置 LLM / VLM / TTS API Key
 
-项目使用阿里云 DashScope API（Qwen 系列模型），需配置环境变量：
+项目全部 AI 能力统一通过 **阿里云百炼 DashScope** 调用，包含三类模型：
+
+| 用途 | 模型 | 调用方式 |
+|------|------|----------|
+| 文本 LLM（旁白 / 动画方案） | `qwen3.6-plus` | OpenAI 兼容模式 |
+| 视觉 VLM（版面语义增强 / 背景色） | `qwen3.6-plus`（多模态） | OpenAI 兼容模式 |
+| 实时 TTS（分段语音合成） | `qwen3-tts-instruct-flash-realtime` | DashScope 原生 SDK |
+
+> **为什么需要 API Key？** 整条流水线的「分割语义增强 → 旁白生成 → 动画方案 → 语音合成」四个环节都依赖 DashScope，缺失 Key 将导致 `demo.py` 在第一步 VLM 分析时即报错。
+
+#### 步骤 1：获取 DashScope API Key
+
+1. 打开阿里云百炼控制台：<https://bailian.console.aliyun.com/>
+2. 开通「模型服务」并在 **API-KEY 管理** 页面创建新 Key（形如 `sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`）
+3. 确认账户已开通以下模型的调用权限：
+   - `qwen3.6-plus`（通义千问 Plus）
+   - `qwen3-tts-instruct-flash-realtime`（Qwen3-TTS 实时语音）
+
+#### 步骤 2：在项目根目录创建 `key_manage.py`
+
+本仓库已通过 `.gitignore` 排除真实密钥文件，克隆后需**手动创建** `key_manage.py`，内容如下：
+
+```python
+# key_manage.py —— 本地私有密钥文件，请勿提交
+import os
+
+# 阿里云 DashScope 百炼平台 API Key（LLM / VLM / TTS 共用）
+Ali_Cloud_LLM_Key = "sk-your-dashscope-api-key"  # ← 替换为你的真实 Key
+
+# 以下字段仅在启用对应能力时需要，否则保留占位即可
+Ali_Cloud_OSS_Key_ID = ""        # 如需上传 OSS 可填写
+Ali_Cloud_OSS_Key_Secret = ""
+Gemini_API_KEY = ""              # 保留字段，当前版本未使用
+Azure_GPT_4_1_Key = ""           # 保留字段，当前版本未使用
+UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "")
+```
+
+#### 步骤 3：验证 API 连通性
 
 ```bash
-export DASHSCOPE_API_KEY="sk-your-api-key"
+python test_api_health.py
 ```
+
+输出 `✅ LLM 客户端可用` 与 `✅ TTS 服务可用` 即表示配置成功。
+
+#### 可选：切换到其他 OpenAI 兼容服务
+
+若需替换为官方 OpenAI、Azure OpenAI 或其他兼容服务，只需修改 [`openai_client.py`](./openai_client.py) 中的 `DEFAULT_BASE_URL` 与 `DEFAULT_MODEL`，并相应调整 `key_manage.py` 的 Key 字段即可。注意：TTS 模块 (`media/tts_synthesizer.py`) 强依赖 DashScope 原生 SDK，如替换需单独改造或使用 `--no-tts` 跳过。
 
 ### 3. 一键全流程处理（推荐）
 
@@ -234,11 +277,12 @@ result = generate_tts_and_animations(
 
 ## 注意事项
 
-1. **首次运行**会自动从 HuggingFace 下载 DocLayout-YOLO 模型权重（~100MB）
-2. **VLM/LLM 调用**依赖网络和 DashScope API，处理速度受 API 响应时间影响
-3. **TTS 合成**使用 Qwen3-TTS 实时流式 API，需要 DashScope API Key
-4. **动画时长**仅覆盖元素讲解段（opening/closing 为纯旁白，不生成动画）
-5. **PPTX还原**使用图片插入方式，保持视觉一致性但不保留可编辑文本
+1. **DocLayout-YOLO 权重**已随仓库提交至 `models/doclayout_yolo_docstructbench_imgsz1024.pt`（~40MB），克隆后无需额外下载
+2. **API Key 必配**：`demo.py` 与 `batch.py` 的 `process/narrate/tts` 子命令均强依赖 DashScope，未配置 `key_manage.py` 会在首次 VLM 调用处失败
+3. **VLM/LLM 调用**依赖网络和 DashScope API，处理速度受 API 响应时间影响；可通过 `--no-vlm` 降级为纯 CV 模式
+4. **TTS 合成**使用 Qwen3-TTS 实时流式 API，账户需开通 `qwen3-tts-instruct-flash-realtime` 模型权限
+5. **动画时长**仅覆盖元素讲解段（opening/closing 为纯旁白，不生成动画）
+6. **PPTX还原**使用图片插入方式，保持视觉一致性但不保留可编辑文本
 
 ## License
 
